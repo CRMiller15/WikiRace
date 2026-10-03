@@ -30,8 +30,85 @@ CLIENT_HTML = CLIENT_HTML.replace(
 app.get("/health", (_req, res) => {
   res.status(200).json({ ok: true, service: "WikiRace Online Multiplayer" });
 });
+
+const MULTIPLAYER_RESULT_FIX = `
+<script>
+(function(){
+  function forceMultiplayerResult(won){
+    try{
+      multiFinished = true;
+      running = false;
+      if (typeof raf !== "undefined") cancelAnimationFrame(raf);
+      finishKind = "multi";
+
+      const title = document.getElementById("finishTitle");
+      if (title) {
+        title.textContent = won ? "YOU WON" : "YOU LOST";
+        title.classList.toggle("multi-result-win", !!won);
+        title.classList.toggle("multi-result-loss", !won);
+      }
+
+      const finalTime = document.getElementById("finalTime");
+      const finalMeta = document.getElementById("finalMeta");
+      if (finalTime) finalTime.textContent = "";
+      if (finalMeta) finalMeta.textContent = "";
+
+      const pathEl = document.getElementById("path");
+      if (pathEl) {
+        pathEl.classList.remove("hidden");
+        pathEl.innerHTML = '<div class="multi-finish-simple">Multiplayer results are not saved to the leaderboard.</div>';
+      }
+
+      const primary = document.getElementById("finishPrimary");
+      if (primary) primary.textContent = "Restart";
+
+      const confetti = document.getElementById("confetti");
+      if (confetti) confetti.classList.add("hidden");
+
+      if (typeof showOnly === "function") showOnly("finish");
+    } catch(e) {
+      console.error("WikiRace multiplayer result fix:", e);
+    }
+  }
+
+  // Replace the existing finish function completely.
+  try { multiplayerResult = function(won, data){ forceMultiplayerResult(!!won); }; } catch(e){}
+
+  // Replace the multiplayer victory path so the winner changes screens immediately.
+  try {
+    const originalHandleVictory = handleVictory;
+    handleVictory = async function(){
+      if (typeof mode !== "undefined" && mode === "multi") {
+        if (!running || multiFinished) return;
+        const elapsed = Math.max(0, serverNow() - multiStartAtServer);
+        forceMultiplayerResult(true);
+        if (socket && multiRoom) {
+          socket.emit("multiFinish", {room: multiRoom, elapsed: elapsed, clicks: clicks});
+        }
+        return;
+      }
+      return originalHandleVictory();
+    };
+  } catch(e){}
+
+  // Also force the authoritative server result on either player.
+  try {
+    if (socket) {
+      socket.on("raceResult", function(data){
+        if (!multiRoom || data.room !== multiRoom) return;
+        forceMultiplayerResult(!!data.won);
+      });
+    }
+  } catch(e){}
+})();
+</script>
+`;
+
 app.get("/", (_req, res) => {
-  res.type("html").send(CLIENT_HTML);
+  const html = CLIENT_HTML.includes("</body>")
+    ? CLIENT_HTML.replace("</body>", MULTIPLAYER_RESULT_FIX + "</body>")
+    : CLIENT_HTML + MULTIPLAYER_RESULT_FIX;
+  res.type("html").send(html);
 });
 
 const rooms = new Map();
