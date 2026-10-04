@@ -42,148 +42,176 @@ const MULTIPLAYER_RESULT_FIX = `
     });
   }
 
-  function currentArticleName(){
-    const el = document.getElementById("currentTitle");
-    if (!el) return "";
-    return String(el.textContent || "").replace(/^Current article:\\s*/i, "").trim();
+  function cleanWikiTitle(raw){
+    try{
+      let t=String(raw||"").trim();
+      if(!t) return "";
+      t=decodeURIComponent(t).replace(/_/g," ");
+      return t.trim();
+    }catch(e){
+      return String(raw||"").replace(/_/g," ").trim();
+    }
   }
 
-  function syncPath(){
+  function titleFromAnchor(a){
     try{
-      if (typeof mode === "undefined" || mode !== "multi" || !multiRoom) return;
-      const name = currentArticleName();
-      if (!name) return;
-      const p = window.__multiPath;
-      if (!p.length || p[p.length - 1] !== name) p.push(name);
-      if (socket) socket.emit("multiPath", {room: multiRoom, path: p.slice()});
+      const href=a.getAttribute("href")||"";
+      if(!href) return "";
+      const u=new URL(href,location.href);
+      if(/wikipedia\.org$/i.test(u.hostname)){
+        const m=u.pathname.match(/^\/wiki\/(.+)$/);
+        if(m) return cleanWikiTitle(m[1].split("#")[0]);
+        if(u.pathname==="/w/index.php"){
+          const q=u.searchParams.get("title");
+          if(q) return cleanWikiTitle(q);
+        }
+      }
+      const m2=href.match(/\/wiki\/([^#?]+)/);
+      if(m2) return cleanWikiTitle(m2[1]);
+      return "";
+    }catch(e){ return ""; }
+  }
+
+  function sendPath(){
+    try{
+      if(typeof mode==="undefined"||mode!=="multi"||!multiRoom||!socket) return;
+      socket.emit("multiPath",{room:multiRoom,path:window.__multiPath.slice(0,200)});
     }catch(e){}
   }
 
-  function renderPathList(title, items){
-    const safe = Array.isArray(items) ? items : [];
-    const rows = safe.length
-      ? safe.map(function(item, i){
+  function addToPath(title){
+    title=cleanWikiTitle(title);
+    if(!title) return;
+    const p=window.__multiPath;
+    if(!p.length||p[p.length-1]!==title){
+      p.push(title);
+      if(p.length>200) p.splice(0,p.length-200);
+      sendPath();
+    }
+  }
+
+  function renderPathList(title,items){
+    const safe=Array.isArray(items)?items:[];
+    const rows=safe.length
+      ? safe.map(function(item,i){
           return '<div style="padding:7px 0;border-bottom:1px solid rgba(255,255,255,.12);font-size:14px;"><strong>'+(i+1)+'.</strong> '+escPathText(item)+'</div>';
         }).join("")
       : '<div style="opacity:.7;padding:8px 0;">No path data available.</div>';
-
     return '<div style="flex:1;min-width:260px;background:rgba(9,18,36,.72);border:1px solid rgba(255,255,255,.16);border-radius:16px;padding:16px;text-align:left;">'
       + '<div style="font-weight:900;font-size:15px;letter-spacing:.08em;margin-bottom:9px;">'+title+'</div>'
       + '<div style="max-height:300px;overflow:auto;">'+rows+'</div></div>';
   }
 
-  function forceMultiplayerResult(won, data){
+  function forceMultiplayerResult(won,data){
     try{
-      multiFinished = true;
-      running = false;
-      if (typeof raf !== "undefined") cancelAnimationFrame(raf);
-      finishKind = "multi";
+      multiFinished=true;
+      running=false;
+      if(typeof raf!=="undefined") cancelAnimationFrame(raf);
+      finishKind="multi";
 
-      const title = document.getElementById("finishTitle");
-      if (title) {
-        title.textContent = won ? "YOU WON" : "YOU LOST";
-        title.classList.toggle("multi-result-win", !!won);
-        title.classList.toggle("multi-result-loss", !won);
+      const title=document.getElementById("finishTitle");
+      if(title){
+        title.textContent=won?"YOU WON":"YOU LOST";
+        title.classList.toggle("multi-result-win",!!won);
+        title.classList.toggle("multi-result-loss",!won);
       }
 
-      const finalTime = document.getElementById("finalTime");
-      const finalMeta = document.getElementById("finalMeta");
-      if (finalTime) finalTime.textContent = "";
-      if (finalMeta) finalMeta.textContent = "";
+      const finalTime=document.getElementById("finalTime");
+      const finalMeta=document.getElementById("finalMeta");
+      if(finalTime) finalTime.textContent="";
+      if(finalMeta) finalMeta.textContent="";
 
-      const yourPath = (data && Array.isArray(data.yourPath) && data.yourPath.length)
+      const yourPath=(data&&Array.isArray(data.yourPath)&&data.yourPath.length)
         ? data.yourPath
         : window.__multiPath.slice();
-      const opponentPath = (data && Array.isArray(data.opponentPath))
+      const opponentPath=(data&&Array.isArray(data.opponentPath))
         ? data.opponentPath
         : [];
 
-      const pathEl = document.getElementById("path");
-      if (pathEl) {
+      const pathEl=document.getElementById("path");
+      if(pathEl){
         pathEl.classList.remove("hidden");
-        pathEl.innerHTML =
+        pathEl.innerHTML=
           '<div style="width:100%;margin-top:18px;">'
           + '<div style="font-size:18px;font-weight:900;margin-bottom:12px;">RACE PATHS</div>'
           + '<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start;">'
-          + renderPathList("YOUR PATH", yourPath)
-          + renderPathList("OPPONENT PATH", opponentPath)
+          + renderPathList("YOUR PATH",yourPath)
+          + renderPathList("OPPONENT PATH",opponentPath)
           + '</div>'
           + '<div style="margin-top:12px;opacity:.65;font-size:12px;text-align:center;">Multiplayer results are not saved to the leaderboard.</div>'
           + '</div>';
       }
 
-      const primary = document.getElementById("finishPrimary");
-      if (primary) primary.textContent = "Restart";
+      const primary=document.getElementById("finishPrimary");
+      if(primary) primary.textContent="Restart";
+      const confetti=document.getElementById("confetti");
+      if(confetti) confetti.classList.add("hidden");
 
-      const confetti = document.getElementById("confetti");
-      if (confetti) confetti.classList.add("hidden");
-
-      if (typeof showOnly === "function") showOnly("finish");
-    } catch(e) {
-      console.error("WikiRace multiplayer result fix:", e);
+      if(typeof showOnly==="function") showOnly("finish");
+    }catch(e){
+      console.error("WikiRace multiplayer result fix:",e);
     }
   }
 
-  // Track the initial route and every subsequent article change.
-  try {
-    if (socket) {
-      socket.on("racePrepare", function(data){
-        window.__multiPath = [];
-        if (data && data.start) window.__multiPath.push(String(data.start));
-        if (multiRoom) socket.emit("multiPath", {room: multiRoom, path: window.__multiPath.slice()});
+  try{
+    if(socket){
+      socket.on("racePrepare",function(data){
+        window.__multiPath=[];
+        if(data&&data.start) addToPath(data.start);
+        sendPath();
       });
     }
+  }catch(e){}
 
-    const current = document.getElementById("currentTitle");
-    if (current && window.MutationObserver) {
-      new MutationObserver(function(){ setTimeout(syncPath, 0); })
-        .observe(current, {childList:true, subtree:true, characterData:true});
-    }
-  } catch(e){}
+  document.addEventListener("click",function(ev){
+    try{
+      if(typeof mode==="undefined"||mode!=="multi"||!running||multiFinished) return;
+      const a=ev.target&&ev.target.closest?ev.target.closest("a"):null;
+      if(!a) return;
+      const title=titleFromAnchor(a);
+      if(title) addToPath(title);
+    }catch(e){}
+  },true);
 
-  // Replace the existing finish function completely.
-  try {
-    multiplayerResult = function(won, data){
-      forceMultiplayerResult(!!won, data || {});
+  try{
+    multiplayerResult=function(won,data){
+      forceMultiplayerResult(!!won,data||{});
     };
-  } catch(e){}
+  }catch(e){}
 
-  // The winner changes screens immediately, then receives the complete
-  // server result (including both paths) a moment later.
-  try {
-    const originalHandleVictory = handleVictory;
-    handleVictory = async function(){
-      if (typeof mode !== "undefined" && mode === "multi") {
-        if (!running || multiFinished) return;
-        syncPath();
-        const elapsed = Math.max(0, serverNow() - multiStartAtServer);
-        forceMultiplayerResult(true, {yourPath: window.__multiPath.slice(), opponentPath: []});
-        if (socket && multiRoom) {
-          socket.emit("multiFinish", {
-            room: multiRoom,
-            elapsed: elapsed,
-            clicks: clicks,
-            path: window.__multiPath.slice()
+  try{
+    const originalHandleVictory=handleVictory;
+    handleVictory=async function(){
+      if(typeof mode!=="undefined"&&mode==="multi"){
+        if(!running||multiFinished) return;
+        const elapsed=Math.max(0,serverNow()-multiStartAtServer);
+        sendPath();
+        forceMultiplayerResult(true,{yourPath:window.__multiPath.slice(),opponentPath:[]});
+        if(socket&&multiRoom){
+          socket.emit("multiFinish",{
+            room:multiRoom,
+            elapsed:elapsed,
+            clicks:clicks,
+            path:window.__multiPath.slice()
           });
         }
         return;
       }
       return originalHandleVictory();
     };
-  } catch(e){}
+  }catch(e){}
 
-  // Authoritative result updates BOTH clients with both routes.
-  try {
-    if (socket) {
-      socket.on("raceResult", function(data){
-        if (!multiRoom || data.room !== multiRoom) return;
-        forceMultiplayerResult(!!data.won, data || {});
+  try{
+    if(socket){
+      socket.on("raceResult",function(data){
+        if(!multiRoom||data.room!==multiRoom) return;
+        forceMultiplayerResult(!!data.won,data||{});
       });
     }
-  } catch(e){}
+  }catch(e){}
 })();
 </script>
-`
+`;
 
 app.get("/", (_req, res) => {
   const html = CLIENT_HTML.includes("</body>")
