@@ -34,7 +34,45 @@ app.get("/health", (_req, res) => {
 const MULTIPLAYER_RESULT_FIX = `
 <script>
 (function(){
-  function forceMultiplayerResult(won){
+  window.__multiPath = [];
+
+  function escPathText(value){
+    return String(value || "").replace(/[&<>"']/g, function(ch){
+      return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch];
+    });
+  }
+
+  function currentArticleName(){
+    const el = document.getElementById("currentTitle");
+    if (!el) return "";
+    return String(el.textContent || "").replace(/^Current article:\\s*/i, "").trim();
+  }
+
+  function syncPath(){
+    try{
+      if (typeof mode === "undefined" || mode !== "multi" || !multiRoom) return;
+      const name = currentArticleName();
+      if (!name) return;
+      const p = window.__multiPath;
+      if (!p.length || p[p.length - 1] !== name) p.push(name);
+      if (socket) socket.emit("multiPath", {room: multiRoom, path: p.slice()});
+    }catch(e){}
+  }
+
+  function renderPathList(title, items){
+    const safe = Array.isArray(items) ? items : [];
+    const rows = safe.length
+      ? safe.map(function(item, i){
+          return '<div style="padding:7px 0;border-bottom:1px solid rgba(255,255,255,.12);font-size:14px;"><strong>'+(i+1)+'.</strong> '+escPathText(item)+'</div>';
+        }).join("")
+      : '<div style="opacity:.7;padding:8px 0;">No path data available.</div>';
+
+    return '<div style="flex:1;min-width:260px;background:rgba(9,18,36,.72);border:1px solid rgba(255,255,255,.16);border-radius:16px;padding:16px;text-align:left;">'
+      + '<div style="font-weight:900;font-size:15px;letter-spacing:.08em;margin-bottom:9px;">'+title+'</div>'
+      + '<div style="max-height:300px;overflow:auto;">'+rows+'</div></div>';
+  }
+
+  function forceMultiplayerResult(won, data){
     try{
       multiFinished = true;
       running = false;
@@ -53,10 +91,25 @@ const MULTIPLAYER_RESULT_FIX = `
       if (finalTime) finalTime.textContent = "";
       if (finalMeta) finalMeta.textContent = "";
 
+      const yourPath = (data && Array.isArray(data.yourPath) && data.yourPath.length)
+        ? data.yourPath
+        : window.__multiPath.slice();
+      const opponentPath = (data && Array.isArray(data.opponentPath))
+        ? data.opponentPath
+        : [];
+
       const pathEl = document.getElementById("path");
       if (pathEl) {
         pathEl.classList.remove("hidden");
-        pathEl.innerHTML = '<div class="multi-finish-simple">Multiplayer results are not saved to the leaderboard.</div>';
+        pathEl.innerHTML =
+          '<div style="width:100%;margin-top:18px;">'
+          + '<div style="font-size:18px;font-weight:900;margin-bottom:12px;">RACE PATHS</div>'
+          + '<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start;">'
+          + renderPathList("YOUR PATH", yourPath)
+          + renderPathList("OPPONENT PATH", opponentPath)
+          + '</div>'
+          + '<div style="margin-top:12px;opacity:.65;font-size:12px;text-align:center;">Multiplayer results are not saved to the leaderboard.</div>'
+          + '</div>';
       }
 
       const primary = document.getElementById("finishPrimary");
@@ -71,19 +124,47 @@ const MULTIPLAYER_RESULT_FIX = `
     }
   }
 
-  // Replace the existing finish function completely.
-  try { multiplayerResult = function(won, data){ forceMultiplayerResult(!!won); }; } catch(e){}
+  // Track the initial route and every subsequent article change.
+  try {
+    if (socket) {
+      socket.on("racePrepare", function(data){
+        window.__multiPath = [];
+        if (data && data.start) window.__multiPath.push(String(data.start));
+        if (multiRoom) socket.emit("multiPath", {room: multiRoom, path: window.__multiPath.slice()});
+      });
+    }
 
-  // Replace the multiplayer victory path so the winner changes screens immediately.
+    const current = document.getElementById("currentTitle");
+    if (current && window.MutationObserver) {
+      new MutationObserver(function(){ setTimeout(syncPath, 0); })
+        .observe(current, {childList:true, subtree:true, characterData:true});
+    }
+  } catch(e){}
+
+  // Replace the existing finish function completely.
+  try {
+    multiplayerResult = function(won, data){
+      forceMultiplayerResult(!!won, data || {});
+    };
+  } catch(e){}
+
+  // The winner changes screens immediately, then receives the complete
+  // server result (including both paths) a moment later.
   try {
     const originalHandleVictory = handleVictory;
     handleVictory = async function(){
       if (typeof mode !== "undefined" && mode === "multi") {
         if (!running || multiFinished) return;
+        syncPath();
         const elapsed = Math.max(0, serverNow() - multiStartAtServer);
-        forceMultiplayerResult(true);
+        forceMultiplayerResult(true, {yourPath: window.__multiPath.slice(), opponentPath: []});
         if (socket && multiRoom) {
-          socket.emit("multiFinish", {room: multiRoom, elapsed: elapsed, clicks: clicks});
+          socket.emit("multiFinish", {
+            room: multiRoom,
+            elapsed: elapsed,
+            clicks: clicks,
+            path: window.__multiPath.slice()
+          });
         }
         return;
       }
@@ -91,18 +172,18 @@ const MULTIPLAYER_RESULT_FIX = `
     };
   } catch(e){}
 
-  // Also force the authoritative server result on either player.
+  // Authoritative result updates BOTH clients with both routes.
   try {
     if (socket) {
       socket.on("raceResult", function(data){
         if (!multiRoom || data.room !== multiRoom) return;
-        forceMultiplayerResult(!!data.won);
+        forceMultiplayerResult(!!data.won, data || {});
       });
     }
   } catch(e){}
 })();
 </script>
-`;
+`
 
 app.get("/", (_req, res) => {
   const html = CLIENT_HTML.includes("</body>")
@@ -156,7 +237,7 @@ io.on("connection", socket => {
     const existing = socketRoom.get(socket.id);
     if (existing) closeOrUpdateAfterLeave(socket.id, existing);
     const code = makeCode();
-    rooms.set(code, { host: socket.id, players: [socket.id], ready: new Set(), state: "lobby", start: "", end: "", winner: null });
+    rooms.set(code, { host: socket.id, players: [socket.id], ready: new Set(), paths: new Map(), state: "lobby", start: "", end: "", winner: null });
     socketRoom.set(socket.id, code);
     socket.join(code);
     cb?.({ ok: true, room: code, players: 1 });
@@ -190,7 +271,7 @@ io.on("connection", socket => {
     if (room.host !== socket.id) return cb?.({ ok: false, error: "Only the host can start the race." });
     if (room.players.length !== 2) return cb?.({ ok: false, error: "Both players must be connected." });
     if (!start || !end) return cb?.({ ok: false, error: "Choose both articles." });
-    room.start = String(start); room.end = String(end); room.state = "preparing"; room.ready.clear(); room.winner = null;
+    room.start = String(start); room.end = String(end); room.state = "preparing"; room.ready.clear(); room.paths = new Map(); room.winner = null;
     io.to(code).emit("racePrepare", { room: code, start: room.start, end: room.end });
     cb?.({ ok: true });
   });
@@ -217,19 +298,44 @@ io.on("connection", socket => {
     room.state = "lobby"; room.ready.clear();
     io.to(code).emit("rematch", { room: code });
   });
+  socket.on("multiPath", ({ room: raw, path }) => {
+    const code = String(raw || "").toUpperCase();
+    const room = rooms.get(code);
+    if (!room || !room.players.includes(socket.id)) return;
+    const cleanPath = Array.isArray(path)
+      ? path.map(x => String(x || "").trim()).filter(Boolean).slice(0, 200)
+      : [];
+    room.paths.set(socket.id, cleanPath);
+  });
+
   socket.on("multiProgress", ({ room: raw, clicks }) => {
     const code = String(raw || "").toUpperCase();
     const room = rooms.get(code);
     if (!room || !room.players.includes(socket.id)) return;
     socket.to(code).emit("opponentProgress", { room: code, clicks: Math.max(0, Number(clicks) || 0) });
   });
-  socket.on("multiFinish", ({ room: raw, elapsed, clicks }) => {
+  socket.on("multiFinish", ({ room: raw, elapsed, clicks, path }) => {
     const code = String(raw || "").toUpperCase();
     const room = rooms.get(code);
     if (!room || !room.players.includes(socket.id) || room.winner) return;
-    room.winner = socket.id; room.state = "finished";
+
+    if (Array.isArray(path)) {
+      room.paths.set(socket.id, path.map(x => String(x || "").trim()).filter(Boolean).slice(0, 200));
+    }
+
+    room.winner = socket.id;
+    room.state = "finished";
+
     for (const id of room.players) {
-      io.to(id).emit("raceResult", { room: code, won: id === socket.id, winnerElapsed: Math.max(0, Number(elapsed) || 0), winnerClicks: Math.max(0, Number(clicks) || 0) });
+      const opponentId = room.players.find(playerId => playerId !== id);
+      io.to(id).emit("raceResult", {
+        room: code,
+        won: id === socket.id,
+        winnerElapsed: Math.max(0, Number(elapsed) || 0),
+        winnerClicks: Math.max(0, Number(clicks) || 0),
+        yourPath: room.paths.get(id) || [],
+        opponentPath: opponentId ? (room.paths.get(opponentId) || []) : []
+      });
     }
   });
   socket.on("multiForfeit", ({ room: raw }) => {
@@ -244,7 +350,7 @@ io.on("connection", socket => {
     const code = String(raw || "").toUpperCase();
     const room = rooms.get(code);
     if (!room || !room.players.includes(socket.id)) return;
-    room.state = "lobby"; room.ready.clear(); room.winner = null; room.start = ""; room.end = "";
+    room.state = "lobby"; room.ready.clear(); room.paths = new Map(); room.winner = null; room.start = ""; room.end = "";
     io.to(code).emit("rematch", { room: code });
     emitRoomUpdate(code);
   });
